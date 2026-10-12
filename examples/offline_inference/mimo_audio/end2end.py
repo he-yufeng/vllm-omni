@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM-Omni project
 """
 This example shows how to use vLLM for running offline inference
 with the correct prompt format on MiMo-Audio-Omni.
@@ -170,6 +170,14 @@ query_map = {
 
 def main(args):
     model_name = args.model_name
+
+    # Optional private-CUDA-graph validation hooks; see mimo_graph_instrument.py.
+    # No-op unless MIMO_GRAPH_INSTRUMENT / MIMO_GRAPH_FORCE_EAGER is set. Must
+    # run before Omni(...) constructs the model and captures the graphs.
+    if os.environ.get("MIMO_GRAPH_INSTRUMENT") or os.environ.get("MIMO_GRAPH_FORCE_EAGER"):
+        import mimo_graph_instrument
+
+        mimo_graph_instrument.install()
 
     # Get paths from args
     text = getattr(args, "text", None)
