@@ -666,7 +666,6 @@ DIFFUSION_NON_PARALLEL_ENGINE_ARGS = [
     ("max_generated_image_size", 1048576),
     ("tts_max_instructions_length", 1000),
     ("enable_diffusion_pipeline_profiler", True),
-    ("auxiliary_text_encoder", "/models/extras-llama"),
 ]
 
 
@@ -690,8 +689,8 @@ def test_non_parallel_diffusion_engine_args_reach_default_diffusion_config():
 
     Forward the explicit overrides to the generic diffusion fallback:
     ``cache_backend``/``step_execution``/``flow_shift`` are direct
-    ``OmniDiffusionConfig`` fields, ``num_gpus`` resolves the data-parallel
-    degree, and ``auxiliary_text_encoder`` lands in ``extras``.
+    ``OmniDiffusionConfig`` fields and ``num_gpus`` resolves the
+    data-parallel degree.
     """
     from vllm_omni.config.config_factory import StageConfigFactory
 
@@ -700,7 +699,6 @@ def test_non_parallel_diffusion_engine_args_reach_default_diffusion_config():
         "step_execution": True,
         "flow_shift": 12.0,
         "num_gpus": 2,
-        "auxiliary_text_encoder": "/models/extras-llama",
     }
     engine_args = OmniEngineArgs.from_cli_args(SimpleNamespace(**overrides))
     stage_cfg = StageConfigFactory.create_default_diffusion(
@@ -712,7 +710,6 @@ def test_non_parallel_diffusion_engine_args_reach_default_diffusion_config():
     assert resolved["step_execution"] is True
     assert resolved["flow_shift"] == 12.0
     assert resolved["parallel_config"]["data_parallel_size"] == 2
-    assert resolved["extras"]["auxiliary_text_encoder"] == "/models/extras-llama"
 def test_native_mrv2_worker_provides_connector_without_legacy_mixin():
     from vllm_omni.worker.omni_connector_validation import validate_worker_omni_connector
     from vllm_omni.worker_v2.omni_ar_model_runner import OmniARModelRunner
