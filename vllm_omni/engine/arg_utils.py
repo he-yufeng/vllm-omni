@@ -385,7 +385,6 @@ class OmniEngineArgs(EngineArgs):
     max_generated_image_size: int | None = None
     tts_max_instructions_length: int | None = None
     enable_diffusion_pipeline_profiler: bool | None = None
-    auxiliary_text_encoder: str | None = None
 
     @classmethod
     def _add_omni_specific_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -855,7 +854,6 @@ SHARED_FIELDS: frozenset[str] = frozenset(
         "max_generated_image_size",
         "tts_max_instructions_length",
         "enable_diffusion_pipeline_profiler",
-        "auxiliary_text_encoder",
     }
 )
 
