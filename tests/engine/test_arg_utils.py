@@ -710,6 +710,8 @@ def test_non_parallel_diffusion_engine_args_reach_default_diffusion_config():
     assert resolved["step_execution"] is True
     assert resolved["flow_shift"] == 12.0
     assert resolved["parallel_config"]["data_parallel_size"] == 2
+
+
 def test_native_mrv2_worker_provides_connector_without_legacy_mixin():
     from vllm_omni.worker.omni_connector_validation import validate_worker_omni_connector
     from vllm_omni.worker_v2.omni_ar_model_runner import OmniARModelRunner
