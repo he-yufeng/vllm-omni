@@ -554,7 +554,8 @@ def test_audio_text_marks_dedupe_and_sort_once_per_boundary():
     assert done[4].item["content"][0]["transcript"] == "abcdef"
 
 
-def test_truncate_command_validates_against_materialized_in_progress_item():
+@pytest.mark.parametrize("terminal", ["response.done", "audio.cancelled"])
+def test_truncate_command_validates_against_materialized_in_progress_item(terminal):
     state = RealtimeProjectionState(session_id="duplex-truncate-live")
     pcm = base64.b64encode(b"\x00\x10" * 8).decode("ascii")
     project_internal_event(state, {"type": "response.created", "response_id": "resp_1"})
@@ -588,8 +589,30 @@ def test_truncate_command_validates_against_materialized_in_progress_item():
     retrieved = retrieve_item_events(state, {"item_id": "item_resp_1"})[0].to_realtime()
     assert retrieved["item"]["content"][0]["transcript"] == "abcd"
     # The cursor survives retrieval so the terminal item stays truncated.
-    done = project_internal_event(state, {"type": "response.done", "response_id": "resp_1"})
+    done = project_internal_event(state, {"type": terminal, "response_id": "resp_1", "committed_ms": 4_000})
     assert done[4].item["content"][0]["transcript"] == "abcd"
+
+
+def test_repeated_audio_text_marks_do_not_accumulate_between_boundaries():
+    state = RealtimeProjectionState(session_id="duplex-repeated-marks")
+    project_internal_event(state, {"type": "response.created", "response_id": "resp_1"})
+    marks = [{"text_chars": 2, "audio_end_ms": 100}, {"text_chars": 4, "audio_end_ms": 200}]
+    for _ in range(2):
+        for _ in range(100):
+            project_internal_event(
+                state,
+                {
+                    "type": "response.output_audio.delta",
+                    "response_id": "resp_1",
+                    "audio": "AAA=",
+                    "audio_text_marks": marks,
+                },
+            )
+        # A producer may repeat cumulative marks without the client retrieving
+        # the item. Pending storage must be bounded by the distinct marks.
+        assert len(state.response_states["resp_1"].pending_audio_text_marks) <= len(marks)
+        retrieved = retrieve_item_events(state, {"item_id": "item_resp_1"})[0].to_realtime()
+        assert retrieved["item"]["content"][0]["audio_text_marks"] == marks
 
 
 def test_projection_leaves_error_to_typed_emit_sites():

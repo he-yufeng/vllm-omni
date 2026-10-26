@@ -114,9 +114,9 @@ class _ResponseProjection:
     text_parts: list[str] = field(default_factory=list)
     audio_duration_ms: int | None = None
     audio_text_marks: list[dict[str, int]] = field(default_factory=list)
-    # Marks arrive per audio delta; merge/dedupe/sort is deferred to the next
-    # materialization boundary so the per-delta path stays O(delta).
-    pending_audio_text_marks: list[dict[str, int]] = field(default_factory=list)
+    # Deduplicate incoming marks without scanning history. Merge/sort remains
+    # deferred to materialization, keeping the per-delta path O(delta).
+    pending_audio_text_marks: dict[tuple[int, int], dict[str, int]] = field(default_factory=dict)
     audio_delta_emitted: bool = False
     audio_done_emitted: bool = False
     audio_part_added: bool = False
@@ -453,9 +453,9 @@ def _sync_response_audio_text_marks(projection: _ResponseProjection) -> None:
     pending = projection.pending_audio_text_marks
     if not pending:
         return
-    projection.pending_audio_text_marks = []
+    projection.pending_audio_text_marks = {}
     deduped: dict[tuple[int, int], dict[str, int]] = {}
-    for mark in (*projection.audio_text_marks, *pending):
+    for mark in (*projection.audio_text_marks, *pending.values()):
         deduped[(int(mark["audio_end_ms"]), int(mark["text_chars"]))] = mark
     projection.audio_text_marks = sorted(deduped.values(), key=lambda mark: (mark["audio_end_ms"], mark["text_chars"]))
 
@@ -475,7 +475,6 @@ def _remember_response_audio_metadata(
     marks = event.get("audio_text_marks")
     if not isinstance(marks, list):
         return
-    clean_marks: list[dict[str, int]] = []
     for mark in marks:
         if not isinstance(mark, dict):
             continue
@@ -483,9 +482,12 @@ def _remember_response_audio_metadata(
         audio_end_ms = mark.get("audio_end_ms", mark.get("audio_ms"))
         if not isinstance(text_chars, int | float) or not isinstance(audio_end_ms, int | float):
             continue
-        clean_marks.append({"text_chars": max(0, int(text_chars)), "audio_end_ms": max(0, int(audio_end_ms))})
-    if clean_marks:
-        projection.pending_audio_text_marks.extend(clean_marks)
+        text_chars = max(0, int(text_chars))
+        audio_end_ms = max(0, int(audio_end_ms))
+        projection.pending_audio_text_marks[(audio_end_ms, text_chars)] = {
+            "text_chars": text_chars,
+            "audio_end_ms": audio_end_ms,
+        }
 
 
 def _response_created_event(event: Mapping[str, object]) -> ResponseCreated:
@@ -1057,9 +1059,6 @@ def _project(state: RealtimeProjectionState, event: dict[str, object]) -> list[D
             item_id = _response_item_id(state, response_id)
             committed_audio_ms = max(0, int(committed_ms))
             state.item_truncation_cursors[item_id] = (0, committed_audio_ms)
-            cancelled_item = state.conversation_items.get(item_id)
-            if cancelled_item is not None:
-                truncate_realtime_item_content(cancelled_item, content_index=0, audio_end_ms=committed_audio_ms)
         events.extend(_realtime_audio_done_events(state, event, response_id))
         events.extend(
             _realtime_response_terminal_events(
@@ -1100,18 +1099,21 @@ def _project(state: RealtimeProjectionState, event: dict[str, object]) -> list[D
         content_index = event.get("content_index", 0)
         if isinstance(truncated_item_id, str):
             truncated_item = state.conversation_items.get(truncated_item_id)
-            if (
-                truncated_item is not None
-                # An in-progress item is rebuilt from its projection with the
-                # truncation cursor applied at every read boundary; truncating
-                # the stored copy here too would cut it twice.
-                and truncated_item.get("status") != "in_progress"
-            ):
-                truncate_realtime_item_content(
-                    truncated_item,
-                    content_index=_int_or(content_index),
-                    audio_end_ms=_int_or(audio_end_ms),
-                )
+            if truncated_item is not None:
+                if truncated_item.get("status") == "in_progress":
+                    # Native SignalTurn bypasses resolve_truncate_item. Record
+                    # its cursor too, so every read/terminal rebuild keeps the
+                    # truncated prefix without cutting the stored copy twice.
+                    state.item_truncation_cursors[truncated_item_id] = (
+                        _int_or(content_index),
+                        _int_or(audio_end_ms),
+                    )
+                else:
+                    truncate_realtime_item_content(
+                        truncated_item,
+                        content_index=_int_or(content_index),
+                        audio_end_ms=_int_or(audio_end_ms),
+                    )
         return [
             ItemTruncated(
                 item_id=_str_or_none(truncated_item_id),
