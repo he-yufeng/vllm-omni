@@ -361,6 +361,7 @@ class OmniEngineArgs(EngineArgs):
     diffusion_attention_config: str | None = None
     diffusion_compile_granularity: str | None = None
     diffusion_compile_dynamic: bool | None = None
+    enable_cuda_graph_decode: bool | None = None
     cache_backend: str | None = None
     cache_config: str | None = None
     video_output_transport: dict[str, object] | None = None
@@ -369,6 +370,7 @@ class OmniEngineArgs(EngineArgs):
     vae_use_slicing: bool | None = None
     vae_use_tiling: bool | None = None
     vae_fast_path: str | None = None
+    vae_encode_fast_path: str | None = None
     enable_multithread_weight_load: bool | None = None
     enable_broadcast_weight_load: bool | None = None
     num_weight_load_threads: int | None = None
@@ -832,6 +834,7 @@ SHARED_FIELDS: frozenset[str] = frozenset(
         "diffusion_attention_config",
         "diffusion_compile_granularity",
         "diffusion_compile_dynamic",
+        "enable_cuda_graph_decode",
         "cache_backend",
         "cache_config",
         "video_output_transport",
@@ -840,6 +843,7 @@ SHARED_FIELDS: frozenset[str] = frozenset(
         "vae_use_slicing",
         "vae_use_tiling",
         "vae_fast_path",
+        "vae_encode_fast_path",
         "enable_multithread_weight_load",
         "enable_broadcast_weight_load",
         "num_weight_load_threads",
