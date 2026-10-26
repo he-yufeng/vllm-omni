@@ -152,6 +152,9 @@ class RealtimeProjectionState:
     # Only responses between response.created and their terminal retain buffers.
     response_states: dict[str, _ResponseProjection] = field(default_factory=dict)
     item_truncation_cursors: dict[str, tuple[int, int]] = field(default_factory=dict)
+    # Completed items no longer have a projection to rebuild from. Keep the
+    # original transcript only for items that have been truncated.
+    item_truncation_sources: dict[str, dict[int, str]] = field(default_factory=dict)
     active_response_id: str | None = None
     last_response_id: str | None = None
     conversation_items: dict[str, dict[str, object]] = field(default_factory=dict)
@@ -302,7 +305,36 @@ def _remove_conversation_item(state: RealtimeProjectionState, item_id: str) -> b
         remaining_ids = list(state.conversation_items)
         state.last_conversation_item_id = remaining_ids[-1] if remaining_ids else None
     state.item_truncation_cursors.pop(item_id, None)
+    state.item_truncation_sources.pop(item_id, None)
     return removed
+
+
+def _record_item_truncation_cursor(
+    state: RealtimeProjectionState, item_id: str, content_index: int, audio_end_ms: int
+) -> tuple[int, int]:
+    """Keep the shortest cutoff, as the engine does for its conversation history."""
+    previous = state.item_truncation_cursors.get(item_id)
+    if previous is not None and previous[0] == content_index:
+        audio_end_ms = min(previous[1], audio_end_ms)
+    cursor = (content_index, audio_end_ms)
+    state.item_truncation_cursors[item_id] = cursor
+    return cursor
+
+
+def _truncate_item_at_cursor(state: RealtimeProjectionState, item: dict[str, object], cursor: tuple[int, int]) -> None:
+    content_index, audio_end_ms = cursor
+    item_id = item.get("id")
+    if isinstance(item_id, str) and item.get("status") != "in_progress":
+        content = item.get("content")
+        if isinstance(content, list) and 0 <= content_index < len(content):
+            part = content[content_index]
+            if isinstance(part, dict):
+                transcript = part.get("transcript")
+                if isinstance(transcript, str):
+                    sources = state.item_truncation_sources.setdefault(item_id, {})
+                    sources.setdefault(content_index, transcript)
+                    part["transcript"] = sources[content_index]
+    truncate_realtime_item_content(item, content_index=content_index, audio_end_ms=audio_end_ms)
 
 
 def _apply_pending_item_truncation(state: RealtimeProjectionState, item: dict[str, object]) -> None:
@@ -312,8 +344,7 @@ def _apply_pending_item_truncation(state: RealtimeProjectionState, item: dict[st
     cursor = state.item_truncation_cursors.get(item_id)
     if cursor is None:
         return
-    content_index, audio_end_ms = cursor
-    truncate_realtime_item_content(item, content_index=content_index, audio_end_ms=audio_end_ms)
+    _truncate_item_at_cursor(state, item, cursor)
 
 
 def _response_done_output_item(
@@ -1058,7 +1089,7 @@ def _project(state: RealtimeProjectionState, event: dict[str, object]) -> list[D
         if isinstance(committed_ms, int | float):
             item_id = _response_item_id(state, response_id)
             committed_audio_ms = max(0, int(committed_ms))
-            state.item_truncation_cursors[item_id] = (0, committed_audio_ms)
+            _record_item_truncation_cursor(state, item_id, 0, committed_audio_ms)
         events.extend(_realtime_audio_done_events(state, event, response_id))
         events.extend(
             _realtime_response_terminal_events(
@@ -1100,20 +1131,13 @@ def _project(state: RealtimeProjectionState, event: dict[str, object]) -> list[D
         if isinstance(truncated_item_id, str):
             truncated_item = state.conversation_items.get(truncated_item_id)
             if truncated_item is not None:
-                if truncated_item.get("status") == "in_progress":
-                    # Native SignalTurn bypasses resolve_truncate_item. Record
-                    # its cursor too, so every read/terminal rebuild keeps the
-                    # truncated prefix without cutting the stored copy twice.
-                    state.item_truncation_cursors[truncated_item_id] = (
-                        _int_or(content_index),
-                        _int_or(audio_end_ms),
-                    )
-                else:
-                    truncate_realtime_item_content(
-                        truncated_item,
-                        content_index=_int_or(content_index),
-                        audio_end_ms=_int_or(audio_end_ms),
-                    )
+                # Native SignalTurn bypasses resolve_truncate_item. Preserve
+                # its cursor for the next read or terminal rebuild as well.
+                cursor = _record_item_truncation_cursor(
+                    state, truncated_item_id, _int_or(content_index), _int_or(audio_end_ms)
+                )
+                if truncated_item.get("status") != "in_progress":
+                    _truncate_item_at_cursor(state, truncated_item, cursor)
         return [
             ItemTruncated(
                 item_id=_str_or_none(truncated_item_id),
@@ -1500,7 +1524,7 @@ def resolve_truncate_item(state: RealtimeProjectionState, command: TruncateItem,
         return ResolvedControl(
             payloads=[], events=[error_event("bad_event", truncate_error, event_id=command.event_id)]
         )
-    state.item_truncation_cursors[command.item_id] = (command.content_index, command.audio_end_ms)
+    _record_item_truncation_cursor(state, command.item_id, command.content_index, command.audio_end_ms)
     ack_payload: dict[str, object] = {
         "type": "playback.ack",
         "item_id": command.item_id,

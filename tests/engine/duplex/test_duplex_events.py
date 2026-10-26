@@ -490,6 +490,49 @@ def test_one_truncate_command_truncates_retrieved_transcript_once():
     assert state.item_truncation_cursors["item_resp_1"] == (0, 4_000)
 
 
+def test_truncate_ack_after_response_done_keeps_the_resolved_prefix():
+    state = RealtimeProjectionState(session_id="duplex-truncate-done")
+    item_id = "item_resp_1"
+    project_internal_event(state, {"type": "response.created", "response_id": "resp_1"})
+    project_internal_event(
+        state,
+        {
+            "type": "response.output_audio.delta",
+            "response_id": "resp_1",
+            "audio": "AAA=",
+            "text": "abcdefghij",
+            "audio_duration_ms": 10_000,
+            "audio_text_marks": [{"text_chars": 10, "audio_end_ms": 10_000}],
+        },
+    )
+
+    control = resolve_truncate_item(state, TruncateItem(item_id=item_id, audio_end_ms=4_000), has_audio=True)
+    assert control.events == []
+    done = next(
+        event
+        for event in project_internal_event(state, {"type": "response.done", "response_id": "resp_1"})
+        if isinstance(event, ResponseDone)
+    )
+    assert done.response["output"][0]["content"][0]["transcript"] == "abcd"
+    assert state.conversation_items[item_id]["content"][0]["transcript"] == "abcd"
+
+    # The engine acknowledges the resolved command after the response is done.
+    ack = {"type": "conversation.item.truncated", "item_id": item_id, "audio_end_ms": 4_000}
+    project_internal_event(state, ack)
+    project_internal_event(state, ack)
+    assert retrieve_item_events(state, {"item_id": item_id})[0].item["content"][0]["transcript"] == "abcd"
+
+    # A later, shorter cutoff uses the original transcript; a longer cutoff
+    # cannot restore text that the engine has already removed from history.
+    for audio_end_ms, expected in ((2_000, "ab"), (6_000, "ab")):
+        control = resolve_truncate_item(state, TruncateItem(item_id=item_id, audio_end_ms=audio_end_ms), has_audio=True)
+        assert control.events == []
+        project_internal_event(
+            state, {"type": "conversation.item.truncated", "item_id": item_id, "audio_end_ms": audio_end_ms}
+        )
+        assert retrieve_item_events(state, {"item_id": item_id})[0].item["content"][0]["transcript"] == expected
+
+
 def test_response_history_materializes_only_at_retrieval_boundary():
     state = RealtimeProjectionState(session_id="duplex-lazy")
     pcm = base64.b64encode(b"\x00\x10" * 8).decode("ascii")
@@ -652,7 +695,9 @@ def test_queued_conversation_item_events_are_snapshots_not_shared_with_state():
         },
     )
 
-    assert state.conversation_items["item_resp_1"]["content"][0]["transcript"] == "later"
+    assert state.conversation_items["item_resp_1"]["content"] == []
+    retrieved = retrieve_item_events(state, {"item_id": "item_resp_1"})[0].item
+    assert retrieved["content"][0]["transcript"] == "later"
     # Queued event still shows the snapshot taken at response.created.
     assert queued_item["content"] == []
     assert queued_item["status"] == "in_progress"
