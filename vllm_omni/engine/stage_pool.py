@@ -1498,10 +1498,11 @@ class StagePool:
             # top-level msgspec-annotated arguments, so the adapter would arrive
             # as a plain list with no lora_int_id (#9242). Diffusion stages keep
             # the generic path so their "not implemented" shape is unchanged.
-            if method == "add_lora" and self.stage_type != "diffusion" and args and isinstance(args[0], LoRARequest):
+            lora_request = args[0] if args else kwargs.get("lora_request")
+            if method == "add_lora" and self.stage_type != "diffusion" and isinstance(lora_request, LoRARequest):
                 add_lora_async = getattr(client, "add_lora_async", None)
                 if callable(add_lora_async):
-                    result = add_lora_async(args[0])
+                    result = add_lora_async(lora_request)
                     if timeout is not None:
                         return await asyncio.wait_for(result, timeout=timeout)
                     return await result

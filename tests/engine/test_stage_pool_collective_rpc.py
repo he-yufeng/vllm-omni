@@ -218,10 +218,11 @@ def test_cache_reset_failure_is_serialized_and_pool_remains_usable(method, failu
 
 
 @pytest.mark.cpu
-def test_collective_rpc_add_lora_routes_through_typed_client_helper():
+@pytest.mark.parametrize("invoke_with_kwargs", [False, True], ids=["positional", "keyword"])
+def test_collective_rpc_add_lora_routes_through_typed_client_helper(invoke_with_kwargs):
     """#9242: the generic collective path nests the LoRARequest in an untyped
-    args tuple and the worker decodes it as a plain list. The dispatch must hand
-    it to the typed utility call so the adapter survives as a struct."""
+    args tuple and the worker decodes it as a plain list. Positional and keyword
+    calls must both use the typed utility call so the adapter stays a struct."""
 
     from vllm.lora.request import LoRARequest
 
@@ -230,7 +231,10 @@ def test_collective_rpc_add_lora_routes_through_typed_client_helper():
         pool, client = _make_pool(add_lora_async=add_lora)
         request = LoRARequest(lora_name="adapter", lora_int_id=1, lora_path="/tmp/adapter")
 
-        result = await pool.collective_rpc(0, "add_lora", args=(request,))
+        if invoke_with_kwargs:
+            result = await pool.collective_rpc(0, "add_lora", kwargs={"lora_request": request})
+        else:
+            result = await pool.collective_rpc(0, "add_lora", args=(request,))
 
         assert result is True
         add_lora.assert_awaited_once_with(request)
