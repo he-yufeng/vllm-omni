@@ -1727,3 +1727,55 @@ def test_omni_generate_dead_orchestrator_closes_engine(monkeypatch: pytest.Monke
         assert not app.request_states
     finally:
         app.shutdown()
+
+
+# ───────── AsyncOmni.shutdown() fails in-flight requests ─────────
+
+
+@pytest.mark.asyncio
+async def test_async_omni_shutdown_ends_in_flight_streams(monkeypatch: pytest.MonkeyPatch):
+    """shutdown() must resolve in-flight requests with a terminal fatal error so
+    the graceful HTTP shutdown does not wait on a queue that will never receive
+    output (#8912).  The engine never produces output, so without the fix this
+    test hangs."""
+    engine = FakeAsyncOmniEngine(stage_metadata=THREE_STAGE_META)
+    _patch_engine(monkeypatch, engine)
+
+    app = AsyncOmni("dummy-model")
+    generate_task = asyncio.ensure_future(_consume_async(app.generate(prompt="hello", request_id="req-shutdown")))
+    # Let the request reach the engine and block on its output queue.
+    await asyncio.sleep(0.05)
+    assert not generate_task.done()
+
+    app.shutdown()
+
+    with pytest.raises(EngineGenerateError, match="shutting down"):
+        await asyncio.wait_for(generate_task, timeout=2)
+
+
+@pytest.mark.asyncio
+async def test_async_omni_shutdown_from_foreign_thread_wakes_waiter(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The launcher runs shutdown() on an executor thread while the serving loop
+    is alive; the terminal error must be enqueued via call_soon_threadsafe so
+    the waiter wakes in its own loop (#8912)."""
+    engine = FakeAsyncOmniEngine(stage_metadata=THREE_STAGE_META)
+    _patch_engine(monkeypatch, engine)
+
+    app = AsyncOmni("dummy-model")
+    generate_task = asyncio.ensure_future(_consume_async(app.generate(prompt="hello", request_id="req-foreign")))
+    await asyncio.sleep(0.05)
+    assert not generate_task.done()
+
+    # Call shutdown from a thread outside the event loop, like the launcher does.
+    await asyncio.get_event_loop().run_in_executor(None, app.shutdown)
+
+    with pytest.raises(EngineGenerateError, match="shutting down"):
+        await asyncio.wait_for(generate_task, timeout=2)
+
+
+async def _consume_async(gen) -> None:
+    """Drain an async generator so the test only observes the exception."""
+    async for _ in gen:
+        pass
