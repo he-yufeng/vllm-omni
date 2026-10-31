@@ -1735,23 +1735,45 @@ def test_omni_generate_dead_orchestrator_closes_engine(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_async_omni_shutdown_ends_in_flight_streams(monkeypatch: pytest.MonkeyPatch):
-    """shutdown() must resolve in-flight requests with a terminal fatal error so
-    the graceful HTTP shutdown does not wait on a queue that will never receive
-    output (#8912).  The engine never produces output, so without the fix this
-    test hangs."""
-    engine = FakeAsyncOmniEngine(stage_metadata=THREE_STAGE_META)
+    """A shutdown after partial output must terminate every active stream."""
+    engine = FakeAsyncOmniEngine(
+        on_add_request=lambda eng, msg: eng.output_q.put_nowait(
+            make_output_msg(
+                msg["request_id"],
+                0,
+                payload="partial",
+                output_finished=False,
+            )
+        )
+    )
     _patch_engine(monkeypatch, engine)
-
     app = AsyncOmni("dummy-model")
-    generate_task = asyncio.ensure_future(_consume_async(app.generate(prompt="hello", request_id="req-shutdown")))
-    # Let the request reach the engine and block on its output queue.
-    await asyncio.sleep(0.05)
-    assert not generate_task.done()
+    streaming = {request_id: asyncio.Event() for request_id in ("req-1", "req-2")}
 
-    app.shutdown()
+    async def drain(request_id: str) -> None:
+        async for _ in app.generate(prompt="hello", request_id=request_id):
+            streaming[request_id].set()
 
-    with pytest.raises(OmniEngineDeadError, match="shutting down"):
-        await asyncio.wait_for(generate_task, timeout=2)
+    streams = [asyncio.create_task(drain(request_id)) for request_id in streaming]
+    try:
+        await asyncio.wait_for(
+            asyncio.gather(*(event.wait() for event in streaming.values())),
+            timeout=5,
+        )
+
+        app.shutdown()
+        results = await asyncio.wait_for(
+            asyncio.gather(*streams, return_exceptions=True),
+            timeout=5,
+        )
+        assert all(isinstance(result, OmniEngineDeadError) for result in results)
+        assert engine.shutdown_called
+        assert app.request_states == {}
+    finally:
+        app.shutdown()
+        for stream in streams:
+            stream.cancel()
+        await asyncio.gather(*streams, return_exceptions=True)
 
 
 @pytest.mark.asyncio
